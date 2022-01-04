@@ -1,5 +1,5 @@
 import bpy
-from bpy.props import EnumProperty, BoolProperty
+from bpy.props import EnumProperty, BoolProperty, IntProperty
 from bpy_extras.view3d_utils import region_2d_to_origin_3d, region_2d_to_vector_3d, region_2d_to_location_3d
 from bl_ui.space_statusbar import STATUSBAR_HT_header as statusbar
 import bmesh
@@ -8,9 +8,17 @@ from mathutils.geometry import intersect_point_line, intersect_line_line, inters
 from .. utils.graph import get_shortest_path
 from .. utils.ui import popup_message
 from .. utils.draw import draw_line, draw_lines, draw_point, draw_tris, draw_vector
-from .. utils.raycast import cast_bvh_ray_from_mouse
+from .. utils.snap import Snap
 from .. utils.math import average_locations, get_center_between_verts, get_face_center
+from .. utils.selection import get_edges_vert_sequences, get_selection_islands
+from .. utils.registration import get_addon
+from .. utils.system import printd
 from .. items import smartvert_mode_items, smartvert_merge_type_items, smartvert_path_type_items, ctrl, alt
+
+from .. colors import yellow, white, green
+
+
+hypercursor = None
 
 
 def draw_slide_status(op):
@@ -29,6 +37,10 @@ def draw_slide_status(op):
         row.label(text="Cancel")
 
         row.separator(factor=10)
+
+        if op.can_flatten:
+            row.label(text="", icon='EVENT_F')
+            row.label(text=f"Flatten: {op.flatten}")
 
         if not op.is_snapping:
             row.label(text="", icon='EVENT_CTRL')
@@ -52,17 +64,24 @@ class SmartVert(bpy.types.Operator):
     pathtype: EnumProperty(name="Path Type", items=smartvert_path_type_items, default="TOPO")
 
     slideoverride: BoolProperty(name="Slide Override", default=False)
+    vertbevel: BoolProperty(name="Single Vertex Bevelling", default=False)
+
+    index: IntProperty(name="Index of Edge accociated with HyperCursor Gizmo, that is to be removed")
+    can_flatten: BoolProperty(name="Can Flatten", default=False)
+    flatten: BoolProperty(name="Flatten End Face", default=False)
 
     # hidden
-    wrongselection = False
     snapping = False
     passthrough = False
+    mousemerge = False
 
     @classmethod
     def poll(cls, context):
-        if context.mode == 'EDIT_MESH' and (tuple(context.scene.tool_settings.mesh_select_mode) == (True, False, False) or tuple(bpy.context.scene.tool_settings.mesh_select_mode) == (False, True, False)):
-            bm = bmesh.from_edit_mesh(context.active_object.data)
-            return [v for v in bm.verts if v.select]
+        if context.active_object:
+            if context.mode == 'EDIT_MESH':
+                bm = bmesh.from_edit_mesh(context.active_object.data)
+                return [v for v in bm.verts if v.select]
+            return context.mode == 'OBJECT'
 
     def draw(self, context):
         layout = self.layout
@@ -90,16 +109,11 @@ class SmartVert(bpy.types.Operator):
                 if self.mergetype == 'PATHS':
                     r.prop(self, "merge_center_paths", text='in Center', toggle=True)
 
-
             if self.mode == "CONNECT" or (self.mode == "MERGE" and self.mergetype == "PATHS"):
-                if self.wrongselection:
-                    column.label(text="You need to select exactly 4 vertices for paths.", icon="INFO")
-
-                else:
-                    row = column.split(factor=0.3)
-                    row.label(text="Shortest Path")
-                    r = row.row()
-                    r.prop(self, "pathtype", expand=True)
+                row = column.split(factor=0.3)
+                row.label(text="Shortest Path")
+                r = row.row()
+                r.prop(self, "pathtype", expand=True)
 
     def draw_VIEW3D(self):
 
@@ -145,7 +159,14 @@ class SmartVert(bpy.types.Operator):
 
         events = ['MOUSEMOVE', *ctrl, *alt]
 
+        if self.can_flatten:
+            events.append('F')
+
         if event.type in events:
+
+            if event.type == 'F' and event.value == 'PRESS':
+                self.flatten = not self.flatten
+
             if self.passthrough:
                 self.passthrough = False
 
@@ -155,27 +176,11 @@ class SmartVert(bpy.types.Operator):
 
             # snap to edge or face
             elif event.ctrl:
-                hitobj, hitlocation, hitnormal, hitindex, hitdistance, cache = cast_bvh_ray_from_mouse(self.mousepos, candidates=self.snappable, bmeshes=self.snap_bms, bvhs=self.snap_bvhs, debug=False)
-
-                # cache bmeshes
-                if cache['bmesh']:
-                    for name, bm in cache['bmesh'].items():
-                        if name not in self.snap_bms:
-                            bm.faces.ensure_lookup_table()
-                            loop_triangles = bm.calc_loop_triangles()
-                            tri_coords = {}
-
-                            self.snap_bms[name] = (bm, loop_triangles, tri_coords)
-
-                # cache bvhs
-                if cache['bvh']:
-                    for name, bvh in cache['bvh'].items():
-                        if name not in self.snap_bvhs:
-                            self.snap_bvhs[name] = bvh
+                self.S.get_hit(self.mousepos)
 
                 # snap to geometry
-                if hitobj:
-                    self.slide_snap(context, hitobj, hitlocation, hitindex)
+                if self.S.hit:
+                    self.slide_snap(context)
 
                 # side normally if nothing is hit
                 else:
@@ -195,6 +200,7 @@ class SmartVert(bpy.types.Operator):
                 self.loc = self.get_slide_vector_intersection(context)
 
                 self.slide(context)
+
 
 
         # VIEWPORT control
@@ -219,103 +225,204 @@ class SmartVert(bpy.types.Operator):
                 # use it for dissolveing to ensure it works on very small scales as you'd expect
                 bmesh.ops.dissolve_degenerate(self.bm, edges=self.bm.edges, dist=avg_dist / 100)
                 self.bm.normal_update()
-                bmesh.update_edit_mesh(self.active.data)
 
-            self.finish()
+                if context.mode == 'EDIT_MESH':
+                    bmesh.update_edit_mesh(self.active.data)
+                else:
+                    self.bm.to_mesh(self.active.data)
+
+            self.finish(context)
 
             return {'FINISHED'}
 
         # CANCEL
 
         elif event.type in {'RIGHTMOUSE', 'ESC'}:
-
-            # reset original vert locations
-            for v, data in self.verts.items():
-                v.co = data['co']
-
-            self.bm.normal_update()
-            bmesh.update_edit_mesh(self.active.data)
-
-            self.finish()
+            self.cancel_modal(context)
 
             return {'CANCELLED'}
 
         return {'RUNNING_MODAL'}
 
-    def finish(self):
+    def cancel_modal(self, context):
+        '''
+        restore original vert locations, then finish op
+        '''
+
+        for v, data in self.verts.items():
+            v.co = data['co']
+
+        if self.can_flatten:
+            for v, vdict in self.flatten_dict['other_verts'].items():
+                v.co = vdict['co']
+
+        self.bm.normal_update()
+
+        if context.mode == 'EDIT_MESH':
+            bmesh.update_edit_mesh(self.active.data)
+        else:
+            self.bm.to_mesh(self.active.data)
+
+        self.finish(context)
+
+    def finish(self, context):
         bpy.types.SpaceView3D.draw_handler_remove(self.VIEW3D, 'WINDOW')
 
         # reset the statusbar
         statusbar.draw = self.bar_orig
 
-        # remove snap copy of active
-        bpy.data.meshes.remove(self.snap_copy.data, do_unlink=True)
+        self.S.finish()
 
-        # remove snap bmeshes and bhs
-        del self.snap_bms, self.snap_bvhs
+        if context.mode == 'OBJECT':
+            # re-enabled geoemetry gizmos
+            context.active_object.HC.show_geometry_gizmos = True
+
+            # force gizmo update
+            context.active_object.select_set(True)
 
     def invoke(self, context, event):
 
+        # in object mode only allow slide/extend the passed in index from HyperCursor
+        if context.mode == 'OBJECT':
+            global hypercursor
+
+            if hypercursor is None:
+                hypercursor = get_addon('HyperCursor')[0]
+
+            if self.slideoverride and hypercursor:
+                context.active_object.HC.show_geometry_gizmos = False
+
+            else:
+                return {'CANCELLED'}
+
+        # init mouse
+        self.mousepos = Vector((event.mouse_region_x, event.mouse_region_y))
+
         # SLIDE EXTEND
         if self.slideoverride:
-            self.bm = bmesh.from_edit_mesh(context.active_object.data)
-            self.bm.normal_update()
-
-            # init mouse
-            self.mousepos = Vector((event.mouse_region_x, event.mouse_region_y))
+            if tuple(bpy.context.scene.tool_settings.mesh_select_mode) == (False, False, True):
+                return {'CANCELLED'}
 
             self.active = context.active_object
             self.mx = self.active.matrix_world
 
+            if context.mode == 'EDIT_MESH':
+                self.bm = bmesh.from_edit_mesh(self.active.data)
+                self.bm.normal_update()
 
-            # VERT MODE
+                # VERT MODE
 
-            if tuple(bpy.context.scene.tool_settings.mesh_select_mode) == (True, False, False):
+                if tuple(bpy.context.scene.tool_settings.mesh_select_mode) == (True, False, False):
 
-                # get selected verts and history
-                selected = [v for v in self.bm.verts if v.select]
-                history = list(self.bm.select_history)
+                    # get selected verts and history
+                    selected = [v for v in self.bm.verts if v.select]
+                    history = list(self.bm.select_history)
 
-                if len(selected) == 1:
-                    popup_message("Select more than 1 vertex.")
-                    return {'CANCELLED'}
+                    if len(selected) == 1:
+                        popup_message("Select more than 1 vertex.")
+                        return {'CANCELLED'}
 
-                elif not history:
-                    popup_message("Select the last vertex without Box or Circle Select.")
-                    return {'CANCELLED'}
+                    elif not history:
+                        popup_message("Select the last vertex without Box or Circle Select.")
+                        return {'CANCELLED'}
 
-                else:
-
-                    # get each vert that is slid and the target it pushed away from or towards
-                    # also store the initial location of the moved verts
-
-                    # multi target sliding
-                    if len(selected) > 3 and len(selected) % 2 == 0 and set(history) == set(selected):
-                        self.verts = {history[i]: {'co': history[i].co.copy(), 'target': history[i + 1]} for i in range(0, len(history), 2)}
-
-                    # single target sliding
                     else:
-                        last = history[-1]
-                        self.verts = {v: {'co': v.co.copy(), 'target': last} for v in selected if v != last}
 
-            # EDGE MODE
+                        # get each vert that is slid and the target it pushed away from or towards
+                        # also store the initial location of the moved verts
 
-            elif tuple(bpy.context.scene.tool_settings.mesh_select_mode) == (False, True, False):
+                        # multi target sliding
+                        if len(selected) > 3 and len(selected) % 2 == 0 and set(history) == set(selected):
+                            self.verts = {history[i]: {'co': history[i].co.copy(), 'target': history[i + 1]} for i in range(0, len(history), 2)}
 
-                # get selected edges
-                selected = [e for e in self.bm.edges if e.select]
-                self.verts = {}
+                        # single target sliding
+                        else:
+                            last = history[-1]
+                            self.verts = {v: {'co': v.co.copy(), 'target': last} for v in selected if v != last}
 
-                # for each edge find the closest vert to the mouse pointer (based on proximity to the mouse projected into the edge center depth)
-                for edge in selected:
-                    edge_center = average_locations([self.mx @ v.co for v in edge.verts])
+                # EDGE MODE
 
-                    mouse_3d = region_2d_to_location_3d(context.region, context.region_data, self.mousepos, edge_center)
-                    mouse_3d_local = self.mx.inverted_safe() @ mouse_3d
+                elif tuple(bpy.context.scene.tool_settings.mesh_select_mode) == (False, True, False):
 
-                    closest = min([(v, (v.co - mouse_3d_local).length) for v in edge.verts], key=lambda x: x[1])[0]
+                    # get selected edges
+                    selected = [e for e in self.bm.edges if e.select]
+                    self.verts = {}
 
-                    self.verts[closest] = {'co': closest.co.copy(), 'target': edge.other_vert(closest)}
+                    # for each edge find the closest vert to the mouse pointer (based on proximity to the mouse projected into the edge center depth)
+                    for edge in selected:
+                        edge_center = average_locations([self.mx @ v.co for v in edge.verts])
+
+                        mouse_3d = region_2d_to_location_3d(context.region, context.region_data, self.mousepos, edge_center)
+                        mouse_3d_local = self.mx.inverted_safe() @ mouse_3d
+
+                        closest = min([(v, (v.co - mouse_3d_local).length) for v in edge.verts], key=lambda x: x[1])[0]
+
+                        self.verts[closest] = {'co': closest.co.copy(), 'target': edge.other_vert(closest)}
+
+            else:
+                # init mousepos and cursor warp the cursor too, as it's called from the HyperCursor Edit Edge pie menu
+                wm = context.window_manager
+                context.window.cursor_warp(wm.hyper_mousepos[0], wm.hyper_mousepos[1] + 20 * context.preferences.view.ui_scale)
+                self.mousepos = Vector(wm.hyper_mousepos)
+
+                self.bm = bmesh.new()
+                self.bm.from_mesh(self.active.data)
+                self.bm.normal_update()
+                self.bm.edges.ensure_lookup_table()
+
+                edge = self.bm.edges[self.index]
+
+                edge_center = average_locations([self.mx @ v.co for v in edge.verts])
+
+                mouse_3d = region_2d_to_location_3d(context.region, context.region_data, self.mousepos, edge_center)
+                mouse_3d_local = self.mx.inverted_safe() @ mouse_3d
+
+                closest = min([(v, (v.co - mouse_3d_local).length) for v in edge.verts], key=lambda x: x[1])[0]
+
+                self.verts = {closest: {'co': closest.co.copy(), 'target': edge.other_vert(closest)}}
+
+
+            # check if the conditions are met to flatten the end face next the the vert that is slid
+            self.can_flatten = False
+            self.flatten_dict = {}
+
+            if len(self.verts) == 1:
+                # printd(self.verts)
+
+                # get planar edges and end face
+                vert = next(iter(self.verts))
+
+                planar_edges = [e for e in vert.link_edges if not e.other_vert(vert) == self.verts[vert]['target']]
+                # print("planar edges:", [e.index for e in planar_edges])
+
+                if len(planar_edges) == 2:
+                    end_faces = [f for f in planar_edges[0].link_faces if f in planar_edges[1].link_faces]
+
+                    if len(end_faces) == 1:
+                        end_face = end_faces[0]
+                        # print("end face:", end_face.index)
+
+                        # only faces with more than 3 verts should be flattened
+                        if len(end_face.verts) > 3:
+                            self.can_flatten = True
+
+                            # get the 3 verts used to establigh the face normal
+                            tri_verts = set(v for e in planar_edges for v in e.verts)
+                            self.flatten_dict = {'tri_verts': list(tri_verts),
+                                                 'other_verts': {}}
+
+                            # get the other verts, es well as slide edges coordinates
+                            other_verts = [v for v in end_face.verts if v not in tri_verts]
+
+                            for v in other_verts:
+                                slide_edges = [e for e in v.link_edges if e not in end_face.edges]
+
+                                if slide_edges:
+                                    line = [slide_edges[0].verts[0].co.copy(), slide_edges[0].verts[1].co.copy()]
+                                    self.flatten_dict['other_verts'][v] = {'co': v.co.copy(),
+                                                                           'line': line}
+
+                            # printd(self.flatten_dict)
 
 
             # get average target and slid vert locations in world space
@@ -334,24 +441,15 @@ class SmartVert(bpy.types.Operator):
                 self.coords = []
 
                 # init snapping
+                self.S = Snap(context, alternative=[self.active], debug=False)
+
                 self.is_snapping = False
                 self.is_diverging = False
                 self.snap_element = None
-                self.snap_bms = {}
-                self.snap_bvhs = {}
                 self.snap_coords = []
                 self.snap_tri_coords = []
                 self.snap_proximity_coords = []
                 self.snap_ortho_coords = []
-
-                # create copy of the active to raycast on, this prevents an issue where the raycast flips from one face to the other because moving a vert changes the topology
-                self.active.update_from_editmode()
-                self.snap_copy = self.active.copy()
-                self.snap_copy.data = self.active.data.copy()
-
-                # snappable objects are all edit mesh object nicluding the the active's copy
-                edit_mesh_objects = [obj for obj in context.visible_objects if obj.mode == 'EDIT' and obj != self.active]
-                self.snappable = edit_mesh_objects + [self.snap_copy]
 
                 # handlers
                 self.VIEW3D = bpy.types.SpaceView3D.draw_handler_add(self.draw_VIEW3D, (), 'WINDOW', 'POST_VIEW')
@@ -366,9 +464,21 @@ class SmartVert(bpy.types.Operator):
             return {'CANCELLED'}
 
         # MERGE and CONNECT
-        elif tuple(bpy.context.scene.tool_settings.mesh_select_mode) == (True, False, False):
-            self.smart_vert(context)
-            return {'FINISHED'}
+        else:
+            self.vertbevel = False
+            self.mousemerge = False
+            ret = False
+
+            # support vert, edge and face mode when merging to last or center
+            if self.mode == 'MERGE' and self.mergetype in ['LAST', 'CENTER']:
+                ret = self.smart_vert(context)
+
+            # otherwise (vertbevel, path merging, path connecting) only support vert mode
+            elif tuple(bpy.context.scene.tool_settings.mesh_select_mode) == (True, False, False):
+                ret = self.smart_vert(context)
+
+            if ret:
+                return {'FINISHED'}
 
         return {'CANCELLED'}
 
@@ -385,12 +495,16 @@ class SmartVert(bpy.types.Operator):
         bm.verts.ensure_lookup_table()
 
         verts = [v for v in bm.verts if v.select]
+        edges = [e for e in bm.edges if e.select]
+        faces = [f for f in bm.faces if f.select]
 
 
         # VERT BEVEL
 
-        if len(verts) == 1:
+        if len(verts) == 1 and tuple(bpy.context.scene.tool_settings.mesh_select_mode) == (True, False, False):
             bpy.ops.mesh.bevel('INVOKE_DEFAULT', affect='VERTICES')
+            self.vertbevel = True
+            return True
 
 
         # MERGE
@@ -398,33 +512,48 @@ class SmartVert(bpy.types.Operator):
         elif self.mode == "MERGE":
 
             if self.mergetype == "LAST":
-                if len(verts) >= 2:
+
+                if tuple(bpy.context.scene.tool_settings.mesh_select_mode) == (False, False, True):
+                    self.mouse_merge(context, active, bm, verts, faces=faces)
+
+                elif tuple(bpy.context.scene.tool_settings.mesh_select_mode) == (False, True, False) and edges:
+                    self.mouse_merge(context, active, bm, verts, edges=edges)
+
+                elif len(verts) >= 2:
                     if self.validate_history(active, bm, lazy=True):
                         bpy.ops.mesh.merge(type='LAST')
 
+                    else:
+                        self.mouse_merge(context, active, bm, verts=verts, edges=None)
+
+                return True
+
             elif self.mergetype == "CENTER":
-                if len(verts) >= 2:
+                if tuple(bpy.context.scene.tool_settings.mesh_select_mode) == (False, False, True) and faces:
+                    self.center_merge(active, bm, verts, faces=faces)
+
+                elif tuple(bpy.context.scene.tool_settings.mesh_select_mode) == (False, True, False) and edges:
+                    self.center_merge(active, bm, verts, edges=edges)
+
+                elif len(verts) >= 2:
                     bpy.ops.mesh.merge(type='CENTER')
 
-            elif self.mergetype == "PATHS":
-                self.wrongselection = False
+                return True
 
+
+            elif self.mergetype == "PATHS" and tuple(bpy.context.scene.tool_settings.mesh_select_mode) == (True, False, False):
                 if len(verts) == 4:
                     history = self.validate_history(active, bm)
 
                     if history:
                         path1, path2 = self.get_paths(bm, history, topo)
+                        self.merge_paths(active, bm, path1, path2)
+                        return True
 
-                        self.weld(active, bm, path1, path2)
-                        return
-
-                self.wrongselection = True
 
         # CONNECT
 
-        elif self.mode == "CONNECT":
-            self.wrongselection = False
-
+        elif self.mode == "CONNECT" and tuple(bpy.context.scene.tool_settings.mesh_select_mode) == (True, False, False):
             if len(verts) == 4:
                 history = self.validate_history(active, bm)
 
@@ -432,19 +561,7 @@ class SmartVert(bpy.types.Operator):
                     path1, path2 = self.get_paths(bm, history, topo)
 
                     self.connect(active, bm, path1, path2)
-                    return
-
-            self.wrongselection = True
-
-    def get_paths(self, bm, history, topo):
-        pair1 = history[0:2]
-        pair2 = history[2:4]
-        pair2.reverse()
-
-        path1 = get_shortest_path(bm, *pair1, topo=topo, select=True)
-        path2 = get_shortest_path(bm, *pair2, topo=topo, select=True)
-
-        return path1, path2
+                    return True
 
     def validate_history(self, active, bm, lazy=False):
         verts = [v for v in bm.verts if v.select]
@@ -458,17 +575,120 @@ class SmartVert(bpy.types.Operator):
             return history
         return None
 
-    def weld(self, active, bm, path1, path2):
+    def get_paths(self, bm, history, topo):
+        pair1 = history[0:2]
+        pair2 = history[2:4]
+        pair2.reverse()
+
+        path1 = get_shortest_path(bm, *pair1, topo=topo, select=True)
+        path2 = get_shortest_path(bm, *pair2, topo=topo, select=True)
+
+        return path1, path2
+
+    def merge_paths(self, active, bm, path1, path2):
         targetmap = {}
+
         for v1, v2 in zip(path1, path2):
             targetmap[v1] = v2
 
             if self.merge_center_paths:
-                v2.co = (v1.co + v2.co) / 2
+                v2.co = average_locations([v1.co, v2.co])
 
         bmesh.ops.weld_verts(bm, targetmap=targetmap)
+        bmesh.update_edit_mesh(active.data)
+
+    def center_merge(self, active, bm, verts, edges=None, faces=None):
+        '''
+        try finding individual face islands or edge sequences, then merge to the center of each one
+        '''
+
+        if faces:
+            islands = get_selection_islands(faces, debug=False)
+
+            # face islands can still share a corner vert, so ensure you aren't trying to merge the same vert twice
+            seen_verts = []
+
+            for verts, _, _ in islands:
+                merge_verts = [v for v in verts if v not in seen_verts]
+                seen_verts.extend(merge_verts)
+
+                bmesh.ops.pointmerge(bm, verts=merge_verts, merge_co=average_locations([v.co for v in merge_verts]))
+
+        elif edges:
+            all_verts = verts.copy()
+
+            # sorting the edges can fail, if the edge selection contains various crossing edges
+            try:
+                sequences = get_edges_vert_sequences(verts, edges, debug=False)
+
+            # in that case just merge all verts
+            except:
+                sequences = [(all_verts, False)]
+
+            for verts, _ in sequences:
+                bmesh.ops.pointmerge(bm, verts=verts, merge_co=average_locations([v.co for v in verts]))
+
+        # deselect verts and edges
+        for el in list(bm.verts) + list(bm.edges):
+            el.select_set(False)
 
         bmesh.update_edit_mesh(active.data)
+
+    def mouse_merge(self, context, active, bm, verts, edges=None, faces=None):
+        '''
+        try finding individual edge sequences, then merge each one to the point closest to the mouse
+        '''
+
+        def get_merge_co_from_mouse(verts, debug=False):
+            distances = []
+
+            for v in verts:
+                mouse_3d = region_2d_to_location_3d(context.region, context.region_data, self.mousepos, mx @ v.co)
+                mouse_3d_local = mx.inverted_safe() @ mouse_3d
+
+                if debug:
+                    draw_point(mouse_3d_local, mx=mx, color=white, modal=False)
+
+                distances.append((v.co, (v.co - mouse_3d_local).length))
+
+            return min(distances, key=lambda x: x[1])[0]
+
+        mx = active.matrix_world
+
+        if faces:
+            islands = get_selection_islands(faces, debug=False)
+
+            # face islands can still share a corner vert, so ensure you aren't trying to merge the same vert twice
+            seen_verts = []
+
+            for verts, _, _ in islands:
+                merge_verts = [v for v in verts if v not in seen_verts]
+                seen_verts.extend(merge_verts)
+
+                merge_co = get_merge_co_from_mouse(merge_verts)
+                bmesh.ops.pointmerge(bm, verts=merge_verts, merge_co=merge_co)
+
+        elif edges:
+            all_verts = verts.copy()
+
+            # sorting the edges can fail, if the edge selection contains various crossing edges
+            try:
+                sequences = get_edges_vert_sequences(verts, edges, debug=False)
+
+            # in that case just merge all verts
+            except:
+                sequences = [(all_verts, False)]
+
+            for seq, _ in sequences:
+                merge_co = merge_co=get_merge_co_from_mouse(seq)
+                bmesh.ops.pointmerge(bm, verts=seq, merge_co=merge_co)
+
+        else:
+            merge_co = get_merge_co_from_mouse(verts)
+            bmesh.ops.pointmerge(bm, verts=verts, merge_co=merge_co)
+
+        bmesh.update_edit_mesh(active.data)
+        self.mousemerge = True
 
     def connect(self, active, bm, path1, path2):
         for verts in zip(path1, path2):
@@ -503,39 +723,47 @@ class SmartVert(bpy.types.Operator):
 
             self.coords.extend([v.co, target.co])
 
-        self.bm.normal_update()
-        bmesh.update_edit_mesh(self.active.data)
+        if self.can_flatten:
 
-    def slide_snap(self, context, hitobj, hitlocation, hitindex):
+            # flatten
+            if self.flatten:
+                self.flatten_verts()
+
+            # reset verts that can be flattened to their original locations
+            else:
+                for v, vdict in self.flatten_dict['other_verts'].items():
+                    v.co = vdict['co']
+
+        self.bm.normal_update()
+
+        if context.mode == 'EDIT_MESH':
+            bmesh.update_edit_mesh(self.active.data)
+        else:
+            self.bm.to_mesh(self.active.data)
+
+    def slide_snap(self, context):
         '''
         slide snap to edges of all edit mode objects
         '''
 
-        # hit location in hitobj's local space
-        hitmx = hitobj.matrix_world
-        hit = hitmx.inverted() @ hitlocation
+        hitmx = self.S.hitmx
+        hit_co = hitmx.inverted_safe() @ self.S.hitlocation
 
-        # fetch cached bmesh, all loop triangles for it as well as any cachaed tri_coords for view3d face drawing
-        bm, loop_triangles, tri_coords = self.snap_bms[hitobj.name]
+        hitface = self.S.hitface
+        tri_coords = self.S.cache.tri_coords[self.S.hitobj.name][self.S.hitindex]
 
-        # get hitface from the cached bmesh
-        hitface = bm.faces[hitindex]
-
-        # cache tri coords for that face
-        if hitindex not in tri_coords:
-            tri_coords[hitindex] = [hitmx @ l.vert.co for tri in loop_triangles if tri[0].face == hitface for l in tri]
 
         # weigh the following distances, to influence how easily the individual elements can be selected
         face_weight = 25
         edge_weight = 1
 
         # get distance to face center
-        face_distance = (hitface, (hit - hitface.calc_center_median_weighted()).length / face_weight)
+        face_distance = (hitface, (hit_co - hitface.calc_center_median_weighted()).length / face_weight)
 
         # evaluate all hitface edges and get their proximity to the hit, as well as the proximity to the hit from the edge center
         # get the closest edge by multiplying the distance with the center distance, and divide the result by the edge length, this is necessary to deal with split edges
         # edge = min([(e, (hit - intersect_point_line(hit, e.verts[0].co, e.verts[1].co)[0]).length, (hit - get_center_between_verts(*e.verts)).length) for e in hitface.edges if e.calc_length()], key=lambda x: (x[1] * x[2]) / x[0].calc_length())[0]
-        edge = min([(e, (hit - intersect_point_line(hit, e.verts[0].co, e.verts[1].co)[0]).length, (hit - get_center_between_verts(*e.verts)).length) for e in hitface.edges if e.calc_length()], key=lambda x: (x[1] * x[2]) / x[0].calc_length())
+        edge = min([(e, (hit_co - intersect_point_line(hit_co, e.verts[0].co, e.verts[1].co)[0]).length, (hit_co - get_center_between_verts(*e.verts)).length) for e in hitface.edges if e.calc_length()], key=lambda x: (x[1] * x[2]) / x[0].calc_length())
         edge_distance = (edge[0], ((edge[1] * edge[2]) / edge[0].calc_length()) / edge_weight)
 
         # based on the two distances get the closest edge or face
@@ -615,8 +843,42 @@ class SmartVert(bpy.types.Operator):
 
             # avoid drawing unnecessary faces
             if foundintersection:
-                self.snap_tri_coords = tri_coords[hitindex]
+                self.snap_tri_coords = tri_coords
 
+        if self.can_flatten:
+
+            # flatten
+            if self.flatten:
+                self.flatten_verts()
+
+            # reset verts that can be flattened to their original locations
+            else:
+                for v, vdict in self.flatten_dict['other_verts'].items():
+                    v.co = vdict['co']
 
         self.bm.normal_update()
-        bmesh.update_edit_mesh(self.active.data)
+
+        if context.mode == 'EDIT_MESH':
+            bmesh.update_edit_mesh(self.active.data)
+        else:
+            self.bm.to_mesh(self.active.data)
+
+    def flatten_verts(self):
+        '''
+        ensure end face at slid vert is flat
+        '''
+
+        tri_verts = self.flatten_dict['tri_verts']
+
+        tri_dir1 = (tri_verts[0].co - tri_verts[1].co).normalized()
+        tri_dir2 = (tri_verts[2].co - tri_verts[1].co).normalized()
+
+        plane_no = tri_dir1.cross(tri_dir2)
+        plane_co = tri_verts[1].co
+
+        for v, vdict in self.flatten_dict['other_verts'].items():
+
+            i = intersect_line_plane(*vdict['line'], plane_co, plane_no)
+
+            if i:
+                v.co = i

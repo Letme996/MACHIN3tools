@@ -6,9 +6,6 @@ from .. utils.view import update_local_view
 from .. items import focus_method_items, focus_levels_items
 
 
-# TODO: add HUD for local view levels
-
-
 class Focus(bpy.types.Operator):
     bl_idname = "machin3.focus"
     bl_label = "MACHIN3: Focus"
@@ -145,7 +142,6 @@ class Focus(bpy.types.Operator):
                 # generic selection event to force a HUD drawing/handler update
                 else:
                     sel[0].select_set(True)
-
 
         def unfocus(context, view, history):
             last_epoch = history[-1]

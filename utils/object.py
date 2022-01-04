@@ -5,26 +5,18 @@ from . math import flatten_matrix
 
 
 def parent(obj, parentobj):
-    if not parentobj.parent and parentobj.matrix_parent_inverse != Matrix():
-        print("WARNING: Resetting %s's parent inverse matrix, as no parent is defined." % (parentobj.name))
-        parentobj.matrix_parent_inverse = Matrix()
-
-    p = parentobj
-    while p.parent:
-        p = p.parent
+    if obj.parent:
+        unparent(obj)
 
     obj.parent = parentobj
-    obj.matrix_world = p.matrix_parent_inverse @ obj.matrix_world
+    obj.matrix_parent_inverse = parentobj.matrix_world.inverted_safe()
 
 
 def unparent(obj):
     if obj.parent:
-        p = obj.parent
-        while p.parent:
-            p = p.parent
-
+        omx = obj.matrix_world.copy()
         obj.parent = None
-        obj.matrix_world = p.matrix_parent_inverse.inverted_safe() @ obj.matrix_world
+        obj.matrix_world = omx
 
 
 def unparent_children(obj):
@@ -135,6 +127,16 @@ def set_obj_origin(obj, mx, bm=None, decalmachine=False, meshmachine=False):
             if getattr(stash, 'version', False) and float('.'.join([v for v in stash.version.split('.')[:2]])) >= 0.7:
                 stashdeltamx = stash.obj.MM.stashdeltamx
 
+                # duplicate "instanced" stash objs, to prevent offsetting stashes on object's whose origin is not changed
+                # NOTE: it seems this is only required for self stashes for some reason
+                if stash.self_stash:
+                    if stash.obj.users > 2:
+                        print(f"INFO: Duplicating {stash.name}'s stashobj {stash.obj.name} as it's used by multiple stashes")
+
+                        dup = stash.obj.copy()
+                        dup.data = stash.obj.data.copy()
+                        stash.obj = dup
+
                 stash.obj.MM.stashdeltamx = flatten_matrix(deltamx @ stashdeltamx)
                 stash.obj.MM.stashorphanmx = flatten_matrix(mx)
 
@@ -154,7 +156,7 @@ def set_obj_origin(obj, mx, bm=None, decalmachine=False, meshmachine=False):
             # older versions use the stashmx and targetmx
             else:
                 # stashmx in stashtargetmx's local space, aka the stash difference matrix(which is all that's actually needed for stashes, just like for decal backups)
-                stashdeltamx = stash.obj.MM.stashtargetmx.inverted() @ stash.obj.MM.stashmx
+                stashdeltamx = stash.obj.MM.stashtargetmx.inverted_safe() @ stash.obj.MM.stashmx
 
                 stash.obj.MM.stashmx = flatten_matrix(omx @ stashdeltamx)
                 stash.obj.MM.stashtargetmx = flatten_matrix(mx)

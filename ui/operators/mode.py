@@ -14,6 +14,9 @@ class EditMode(bpy.types.Operator):
     bl_label = "Edit Mode"
     bl_options = {'REGISTER', 'UNDO'}
 
+    # hidden (screen cast)
+    toggled_object = False
+
     @classmethod
     def description(cls, context, properties):
         return f"Switch to {'Object' if context.mode == 'EDIT_MESH' else 'Edit'} Mode"
@@ -40,6 +43,8 @@ class EditMode(bpy.types.Operator):
             if sync_tools and active_tool in get_tools_from_context(context):
                 bpy.ops.wm.tool_set_by_id(name=active_tool)
 
+            self.toggled_object = False
+
 
         elif context.mode == "EDIT_MESH":
             reset_xray(context)
@@ -52,6 +57,8 @@ class EditMode(bpy.types.Operator):
 
             if sync_tools and active_tool in get_tools_from_context(context):
                 bpy.ops.wm.tool_set_by_id(name=active_tool)
+
+            self.toggled_object = True
 
         return {'FINISHED'}
 
@@ -223,8 +230,8 @@ class SurfaceDrawMode(bpy.types.Operator):
         else:
             bpy.ops.wm.tool_set_by_id(name="builtin_brush.Draw")
 
-        # enable auto keyframing in 2.93, see https://developer.blender.org/rB6a662ffda836
-        if bpy.app.version >= (2, 93, 0) and not ts.use_keyframe_insert_auto:
+        # enable auto keyframing in 2.93+, see https://developer.blender.org/rB6a662ffda836
+        if not ts.use_keyframe_insert_auto:
             ts.use_keyframe_insert_auto = True
 
         return {'FINISHED'}

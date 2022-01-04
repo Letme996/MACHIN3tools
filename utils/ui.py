@@ -88,13 +88,43 @@ def popup_message(message, title="Info", icon="INFO", terminal=True):
             print(" »", message)
 
 
+# HEADER
+
+def require_header_offset(context, top=True):
+    '''
+    determine if anything written at the top of the screen requires an additional offset due to the presense of tool options
+
+    depending on the Blender version, this varies
+    get the header(2.03) or tool_header(3.0), but only if it's y location is under (bottom) / above (top) the halve the height of the area
+    '''
+
+    area = context.area
+    headers = [r for r in area.regions if r.type == ('HEADER' if bpy.app.version < (3, 0, 0) else 'TOOL_HEADER') and ((r.y > area.height / 2) if top else (r.y < area.height / 2))]
+
+    if headers:
+
+        # in 2.93 we need to check if the tool header is hidden, to determine if an offset should be used
+        if bpy.app.version < (3, 0, 0):
+            return not context.space_data.show_region_tool_header
+
+        # in 3.0,0 we need to check if the tool header is shown
+        else:
+            return context.space_data.show_region_tool_header
+
+
 # KEYMAPS
 
-def kmi_to_string(kmi):
+def kmi_to_string(kmi, docs_mode=False):
     '''
     return keymap item as printable string
     '''
-    return "%s, name: %s, active: %s, map type: %s, type: %s, value: %s, alt: %s, ctrl: %s, shift: %s, properties: %s" % (kmi.idname, kmi.name, kmi.active, kmi.map_type, kmi.type, kmi.value, kmi.alt, kmi.ctrl, kmi.shift, str(kmi.properties.items()))
+
+    kmi_str = f"{kmi.idname}, name: {kmi.name}, active: {kmi.active}, map type: {kmi.map_type}, type: {kmi.type}, value: {kmi.value}, alt: {kmi.alt}, ctrl: {kmi.ctrl}, shift: {kmi.shift}, properties: {str(dict(kmi.properties))}"
+
+    if docs_mode:
+        return f"`{kmi_str}`"
+    else:
+        return kmi_str
 
 
 def draw_keymap_items(kc, name, keylist, layout):

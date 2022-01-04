@@ -21,6 +21,9 @@ shift = ['LEFT_SHIFT', 'RIGHT_SHIFT']
 
 # PREFERENCES
 
+preferences_tabs = [("GENERAL", "General", ""),
+                    ("KEYMAPS", "Keymaps", ""),
+                    ("ABOUT", "About", "")]
 
 matcap_background_type_items = [("THEME", "Theme", ""),
                                 ("WORLD", "World", ""),
@@ -41,6 +44,13 @@ smartvert_merge_type_items = [("LAST", "Last", ""),
 smartvert_path_type_items = [("TOPO", "Topo", ""),
                              ("LENGTH", "Length", "")]
 
+
+smartedge_sharp_mode_items = [('SHARPEN', 'Sharpen', ''),
+                              ('CHAMFER', 'Chamfer', ''),
+                              ('KOREAN', 'Korean Bevel', '')]
+
+smartedge_select_mode_items = [('BOUNDS', 'Bounds/Region', ''),
+                               ('ADJACENT', 'Adjacent', '')]
 
 focus_method_items = [('VIEW_SELECTED', 'View Selected', ''),
                       ('LOCAL_VIEW', 'Local View', '')]
@@ -119,6 +129,12 @@ eevee_preset_items = [('NONE', 'None', ''),
 
 render_engine_items = [('BLENDER_EEVEE', 'Eevee', ''),
                        ('CYCLES', 'Cycles', '')]
+
+
+shading_light_items = [('STUDIO', 'Studio', ''),
+                       ('MATCAP', 'Matcap', ''),
+                       ('FLAT', 'Flat', '')]
+
 
 cycles_device_items = [('CPU', 'CPU', ''),
                        ('GPU', 'GPU', '')]

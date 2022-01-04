@@ -1,10 +1,10 @@
 bl_info = {
     "name": "MACHIN3tools",
-    "author": "MACHIN3",
-    "version": (0, 8, 0),
-    "blender": (2, 83, 0),
+    "author": "MACHIN3, TitusLVR",
+    "version": (0, 9, 0),
+    "blender": (2, 93, 0),
     "location": "",
-    "description": "Streamlining Blender 2.83 and beyond.",
+    "description": "Streamlining Blender 2.93 and beyond.",
     "warning": "",
     "doc_url": "https://machin3.io/MACHIN3tools/docs",
     "category": "Mesh"}
@@ -72,12 +72,12 @@ if 'bpy' in locals():
     reload_modules(bl_info['name'])
 
 import bpy
-from bpy.props import PointerProperty
+from bpy.props import PointerProperty, BoolProperty
 from . properties import M3SceneProperties, M3ObjectProperties
 from . utils.registration import get_core, get_tools, get_pie_menus
 from . utils.registration import register_classes, unregister_classes, register_keymaps, unregister_keymaps, register_icons, unregister_icons, register_msgbus, unregister_msgbus
 from . ui.menus import object_context_menu, mesh_context_menu, add_object_buttons, material_pick_button, outliner_group_toggles, cursor_spin
-from . handlers import update_object_axes_drawing, focus_HUD, surface_slide_HUD, update_group, update_msgbus
+from . handlers import update_object_axes_drawing, focus_HUD, surface_slide_HUD, update_group, update_msgbus, screencast_HUD
 
 
 def register():
@@ -92,6 +92,8 @@ def register():
 
     bpy.types.Scene.M3 = PointerProperty(type=M3SceneProperties)
     bpy.types.Object.M3 = PointerProperty(type=M3ObjectProperties)
+
+    bpy.types.WindowManager.M3_screen_cast = BoolProperty()
 
 
     # TOOLS, PIE MENUS, KEYMAPS, MENUS
@@ -134,6 +136,7 @@ def register():
     bpy.app.handlers.depsgraph_update_post.append(focus_HUD)
     bpy.app.handlers.depsgraph_update_post.append(surface_slide_HUD)
     bpy.app.handlers.depsgraph_update_post.append(update_group)
+    bpy.app.handlers.depsgraph_update_post.append(screencast_HUD)
 
 
     # REGISTRATION OUTPUT
@@ -152,7 +155,7 @@ def unregister():
     bpy.app.handlers.redo_pre.remove(update_object_axes_drawing)
     bpy.app.handlers.load_pre.remove(update_object_axes_drawing)
 
-    from . handlers import focusHUD, surfaceslideHUD
+    from . handlers import focusHUD, surfaceslideHUD, screencastHUD
 
     if focusHUD and "RNA_HANDLE_REMOVED" not in str(focusHUD):
         bpy.types.SpaceView3D.draw_handler_remove(focusHUD, 'WINDOW')
@@ -160,9 +163,13 @@ def unregister():
     if surfaceslideHUD and "RNA_HANDLE_REMOVED" not in str(surfaceslideHUD):
         bpy.types.SpaceView3D.draw_handler_remove(surfaceslideHUD, 'WINDOW')
 
+    if screencastHUD and "RNA_HANDLE_REMOVED" not in str(screencastHUD):
+        bpy.types.SpaceView3D.draw_handler_remove(screencastHUD, 'WINDOW')
+
     bpy.app.handlers.depsgraph_update_post.remove(focus_HUD)
     bpy.app.handlers.depsgraph_update_post.remove(surface_slide_HUD)
     bpy.app.handlers.depsgraph_update_post.remove(update_group)
+    bpy.app.handlers.depsgraph_update_post.remove(screencast_HUD)
 
 
     # MSGBUS

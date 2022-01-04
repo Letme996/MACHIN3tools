@@ -2,17 +2,17 @@ import bpy
 from bpy.props import StringProperty, BoolProperty
 import bmesh
 import os
-import re
 import time
 from ... utils.registration import get_prefs, get_addon
 from ... utils.append import append_material, append_world
-from ... utils.system import add_path_to_recent_files
+from ... utils.system import add_path_to_recent_files, get_incremented_paths
 from ... utils.ui import popup_message, get_icon
 
 
 class New(bpy.types.Operator):
     bl_idname = "machin3.new"
     bl_label = "Current file is unsaved. Start a new file anyway?"
+    bl_description = "Start new .blend file"
     bl_options = {'REGISTER'}
 
 
@@ -34,8 +34,15 @@ class New(bpy.types.Operator):
 class Save(bpy.types.Operator):
     bl_idname = "machin3.save"
     bl_label = "Save"
-    bl_description = "Save"
     bl_options = {'REGISTER'}
+
+    @classmethod
+    def description(cls, context, properties):
+        currentblend = bpy.data.filepath
+
+        if currentblend:
+            return f"Save {currentblend}"
+        return "Save unsaved file as..."
 
     def execute(self, context):
         currentblend = bpy.data.filepath
@@ -57,62 +64,47 @@ class Save(bpy.types.Operator):
 class SaveIncremental(bpy.types.Operator):
     bl_idname = "machin3.save_incremental"
     bl_label = "Incremental Save"
-    bl_description = "Incremental Save"
     bl_options = {'REGISTER'}
 
-
-    def execute(self, context):
+    @classmethod
+    def description(cls, context, properties):
         currentblend = bpy.data.filepath
 
         if currentblend:
-            savepath = self.get_incremented_path(currentblend)
+            incrpaths = get_incremented_paths(currentblend)
 
-            # add it to the recent files list
-            add_path_to_recent_files(savepath)
+            if incrpaths:
+                return f"Save {currentblend} incrementally to {os.path.basename(incrpaths[0])}\nALT: Save to {os.path.basename(incrpaths[1])}"
+
+        return "Save unsaved file as..."
+
+    def invoke(self, context, event):
+        currentblend = bpy.data.filepath
+
+        if currentblend:
+            incrpaths = get_incremented_paths(currentblend)
+            savepath = incrpaths[1] if event.alt else incrpaths[0]
 
             if os.path.exists(savepath):
                 self.report({'ERROR'}, "File '%s' exists already!\nBlend has NOT been saved incrementally!" % (savepath))
+                return {'CANCELLED'}
+
             else:
+
+                # add it to the recent files list
+                add_path_to_recent_files(savepath)
+
                 bpy.ops.wm.save_as_mainfile(filepath=savepath)
 
                 t = time.time()
                 localt = time.strftime('%H:%M:%S', time.localtime(t))
-                print("%s | Saved blend incrementally: %s" % (localt, savepath))
-                self.report({'INFO'}, 'Incrementally saved "%s"' % (os.path.basename(savepath)))
+                print(f"{localt} | Saved {os.path.basename(currentblend)} incrementally to {savepath}")
+                self.report({'INFO'}, f"Incrementally saved to {os.path.basename(savepath)}")
 
         else:
             bpy.ops.wm.save_mainfile('INVOKE_DEFAULT')
 
         return {'FINISHED'}
-
-    def get_incremented_path(self, currentblend):
-        path = os.path.dirname(currentblend)
-        filename = os.path.basename(currentblend)
-
-        filenameRegex = re.compile(r"(.+)\.blend\d*$")
-
-        mo = filenameRegex.match(filename)
-
-        if mo:
-            name = mo.group(1)
-            numberendRegex = re.compile(r"(.*?)(\d+)$")
-
-            mo = numberendRegex.match(name)
-
-            if mo:
-                basename = mo.group(1)
-                numberstr = mo.group(2)
-            else:
-                basename = name + "_"
-                numberstr = "000"
-
-            number = int(numberstr)
-
-            incr = number + 1
-            incrstr = str(incr).zfill(len(numberstr))
-            incrname = basename + incrstr + ".blend"
-
-            return os.path.join(path, incrname)
 
 
 class LoadMostRecent(bpy.types.Operator):
@@ -122,7 +114,7 @@ class LoadMostRecent(bpy.types.Operator):
     bl_options = {"REGISTER"}
 
     def execute(self, context):
-        recent_path = bpy.utils.user_resource('CONFIG', "recent-files.txt")
+        recent_path = bpy.utils.user_resource('CONFIG', path="recent-files.txt")
 
         try:
             with open(recent_path) as file:
@@ -423,16 +415,14 @@ class LoadNext(bpy.types.Operator):
 class Purge(bpy.types.Operator):
     bl_idname = "machin3.purge_orphans"
     bl_label = "MACHIN3: Purge Orphans"
-    bl_description = "Purge Orphans\nALT: Purge Orphans 5 times"
     bl_options = {'REGISTER', 'UNDO'}
 
-    def invoke(self, context, event):
-        if event.alt:
-            for i in range(5):
-                bpy.ops.outliner.orphans_purge()
+    @classmethod
+    def description(cls, context, properties):
+        return "Purge Orphans\nALT: Purge Orphans Recursively"
 
-        else:
-            bpy.ops.outliner.orphans_purge()
+    def invoke(self, context, event):
+        bpy.ops.outliner.orphans_purge(do_local_ids=True, do_linked_ids=True, do_recursive=event.alt)
 
         return {'FINISHED'}
 
@@ -475,5 +465,71 @@ class Clean(bpy.types.Operator):
 
         if context.space_data.local_view:
             bpy.ops.view3d.localview(frame_selected=False)
+
+        return {'FINISHED'}
+
+
+class ReloadLinkedLibraries(bpy.types.Operator):
+    bl_idname = "machin3.reload_linked_libraries"
+    bl_label = "MACHIN3: Reload Linked Liraries"
+    bl_description = ""
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        return bpy.data.libraries
+
+    def execute(self, context):
+        reloaded = []
+
+        for lib in bpy.data.libraries:
+            lib.reload()
+            reloaded.append(lib.name)
+            print(f"Reloaded Library: {lib.name}")
+
+        self.report({'INFO'}, f"Reloaded {'Library' if len(reloaded) == 1 else f'{len(reloaded)} Libraries'}: {', '.join(reloaded)}")
+
+        return {'FINISHED'}
+
+
+class ScreenCast(bpy.types.Operator):
+    bl_idname = "machin3.screen_cast"
+    bl_label = "MACHIN3: Screen Cast"
+    bl_description = "Screen Cast Operators"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def description(cls, context, properties):
+        screencast_keys = get_addon('Screencast Keys')[0]
+
+        if screencast_keys:
+            return "Screen Cast recent Operators and Keys"
+        return "Screen Cast Recent Operators"
+
+    def execute(self, context):
+        # context.scene.M3.screen_cast = not context.scene.M3.screen_cast
+
+        wm = context.window_manager
+        setattr(wm, 'M3_screen_cast', not getattr(wm, 'M3_screen_cast', False))
+
+        screencast_keys = get_addon('Screencast Keys')[0]
+
+        if screencast_keys:
+
+            # switch workspaces back and forth
+            # this prevents "internal error: modal gizmo-map handler has invalid area" errors when maximizing the view
+
+            current = context.workspace
+            other = [ws for ws in bpy.data.workspaces if ws != current]
+
+            if other:
+                context.window.workspace = other[0]
+                context.window.workspace = current
+
+            bpy.ops.wm.sk_screencast_keys('INVOKE_DEFAULT')
+
+        # force handler update via selection event
+        if context.visible_objects:
+            context.visible_objects[0].select_set(context.visible_objects[0].select_get())
 
         return {'FINISHED'}
